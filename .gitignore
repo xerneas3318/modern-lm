@@ -11,3 +11,7 @@ wheels/
 
 # Local instructions
 instructions.md
+train.md
+
+# Secrets
+.env
