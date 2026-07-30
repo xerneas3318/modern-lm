@@ -44,9 +44,12 @@ def get_args():
                    help="run artifacts (checkpoints, logs, samples) go under out-dir/<run-name>/")
     p.add_argument("--run-name", default="modern_1024x24")
     # data / batch
-    p.add_argument("--seq-len", type=int, default=1024)
-    p.add_argument("--batch-size", type=int, default=64, help="per-GPU micro-batch B")
+    p.add_argument("--seq-len", type=int, default=2048, help="context length (Tier 1: was 1024)")
+    p.add_argument("--batch-size", type=int, default=32, help="per-GPU micro-batch B (dropped 64->32 for 2048 ctx)")
     p.add_argument("--total-batch-size", type=int, default=524288, help="tokens per optimizer step")
+    p.add_argument("--doc-mask", action="store_true",
+                   help="intra-document attention masking (block-diagonal on EOS). "
+                        "OFF by default: enabling it disables the FlashAttention causal fast path, so it is slower.")
     # schedule
     p.add_argument("--max-steps", type=int, default=19073)
     p.add_argument("--muon-lr", type=float, default=0.02)
@@ -61,6 +64,17 @@ def get_args():
     p.add_argument("--keep-ckpts", type=int, default=3)
     p.add_argument("--seed", type=int, default=1337)
     p.add_argument("--vocab-size", type=int, default=50304, help="padded vocab (real gpt2 is 50257)")
+    # model size (defaults = the 480M config; override for smoke tests on small GPUs)
+    p.add_argument("--n-layer", type=int, default=24)
+    p.add_argument("--n-embd", type=int, default=1024)
+    p.add_argument("--n-head", type=int, default=16)
+    p.add_argument("--kv-group", type=int, default=4)
+    # data mixing: mix a code corpus in with the web data at train time
+    p.add_argument("--fineweb-dir", default=None, help="override the FineWeb shard dir (default <data-root>/edu_fineweb10B)")
+    p.add_argument("--code-dir", default=None, help="dir of code shards to mix in (e.g. <data-root>/code_python)")
+    p.add_argument("--code-frac", type=float, default=0.0, help="fraction of TRAIN batches drawn from --code-dir")
+    # misc
+    p.add_argument("--no-compile", action="store_true", help="skip torch.compile (faster startup for smoke tests)")
     return p.parse_args()
 
 
@@ -109,7 +123,41 @@ if torch.cuda.is_available():
     torch.cuda.manual_seed(args.seed)
 torch.set_float32_matmul_precision("high")
 
-enc = tiktoken.get_encoding("gpt2")
+# ----------------------------------------------------------------------------
+# special-token reservation
+# ----------------------------------------------------------------------------
+# We pad vocab 50257 -> 50304, leaving IDs 50257..50303 unused (47 free rows the
+# model already has embeddings for). We reserve a handful of them now as atomic
+# special tokens so the SFT / DPO / GRPO / tool-use stages need ZERO embedding
+# surgery. They never appear in pretraining data (so their rows stay near-init
+# and only get trained at SFT) -- that is expected and correct.
+# <|endoftext|> (50256) stays the document separator (already in the FineWeb shards).
+EOS_ID = 50256
+SPECIAL_TOKENS = {
+    "<|im_start|>": 50257,   # chat: turn start   (ChatML)
+    "<|im_end|>":   50258,   # chat: turn end
+    "<pad>":        50259,   # padding for batched SFT
+    "<think>":      50260,   # reasoning delimiter (GRPO / R1-style CoT)
+    "</think>":     50261,
+    "<tool_call>":  50262,   # tool / program-aided-math call
+    "</tool_call>": 50263,
+    # 50264..50303 remain free for future use
+}
+
+
+def build_enc():
+    """GPT-2 BPE + the reserved special tokens above. Same merges/IDs as plain
+    gpt2 (so the pre-tokenized shards stay valid); just adds atomic specials."""
+    base = tiktoken.get_encoding("gpt2")
+    return tiktoken.Encoding(
+        name="gpt2_math",
+        pat_str=base._pat_str,
+        mergeable_ranks=base._mergeable_ranks,
+        special_tokens={**base._special_tokens, **SPECIAL_TOKENS},
+    )
+
+
+enc = build_enc()
 
 T = args.seq_len
 B = args.batch_size
@@ -228,7 +276,7 @@ class CausalSelfAttention(nn.Module):
         self.k_norm = RMSNorm(self.head_dim)
         self.lambdas = nn.Parameter(torch.tensor([1.0, 0.5]))
 
-    def forward(self, x, ve):
+    def forward(self, x, ve, attn_mask=None):
         B, T, C = x.size()
         qkv = self.c_attn(x)
         q, k, v = qkv.split([self.n_embd, self.kv_head * self.head_dim, self.kv_head * self.head_dim], dim=2)
@@ -248,7 +296,9 @@ class CausalSelfAttention(nn.Module):
         k = k.repeat_interleave(self.kv_group, dim=1)
         v = v.repeat_interleave(self.kv_group, dim=1)
 
-        out = F.scaled_dot_product_attention(q, k, v, is_causal=True)
+        # attn_mask None -> use the FlashAttention causal fast path (default).
+        # attn_mask given (doc-masking on) -> explicit mask, no flash fast path.
+        out = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask, is_causal=(attn_mask is None))
         out = out.transpose(1, 2).contiguous().view(B, T, C)
         out = self.c_proj(out)
         return out
@@ -276,15 +326,15 @@ class Block(nn.Module):
         self.attn = CausalSelfAttention(config)
         self.ffw = Swiglu(config)
 
-    def forward(self, x, ve):
-        x = x + self.attn(self.ln_1(x), ve)
+    def forward(self, x, ve, attn_mask=None):
+        x = x + self.attn(self.ln_1(x), ve, attn_mask)
         x = x + self.ffw(self.ln_2(x))
         return x
 
 
 @dataclass
 class GPT2Config:
-    block_size: int = 1024
+    block_size: int = 2048   # Tier 1: context length 1024 -> 2048 (RoPE cache size)
     vocab_size: int = 50304
     n_layer: int = 24
     n_embd: int = 1024
@@ -296,6 +346,7 @@ class GPT(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.half = config.n_layer // 2
+        self.doc_mask = False   # set True after construction to enable intra-doc masking
         self.skip_weights = nn.Parameter(torch.ones(self.half))
         self.transformer = nn.ModuleDict(dict(
             wte=nn.Embedding(config.vocab_size, config.n_embd),
@@ -319,19 +370,29 @@ class GPT(nn.Module):
 
     def forward(self, idx, targets=None):
         B, T = idx.size()
+
+        # intra-document attention mask (block-diagonal on EOS boundaries).
+        # OFF by default -> attn_mask stays None -> FlashAttention causal fast path.
+        attn_mask = None
+        if self.doc_mask:
+            doc_id = (idx == EOS_ID).cumsum(1)                         # (B, T) doc index per token
+            same_doc = doc_id[:, :, None] == doc_id[:, None, :]        # (B, T, T)
+            causal = torch.ones(T, T, dtype=torch.bool, device=idx.device).tril()
+            attn_mask = (same_doc & causal)[:, None, :, :]            # (B, 1, T, T) True = attend
+
         skips = []
         x = self.transformer.wte(idx)
         ve = self.value_emb(idx)
         for i, block in enumerate(self.transformer.h):
             if i < self.half:
-                x = block(x, ve)
+                x = block(x, ve, attn_mask)
                 skips.append(x)
             else:
                 x = x + self.skip_weights[i - self.half] * skips.pop()
-                x = block(x, ve)
+                x = block(x, ve, attn_mask)
         x = self.transformer.ln_f(x)
         logits = self.lm_head(x)
-        cap = 30
+        cap = 15   # Tier 1: softcap 30 -> 15 (modded-nanogpt tuned value)
         logits = cap * torch.tanh(logits / cap)
         loss = None
         if targets is not None:
@@ -368,7 +429,7 @@ def configure_optimizers(model, muon_lr, adam_lr, weight_decay):
 # ----------------------------------------------------------------------------
 # data  (verbatim from gpt.ipynb)
 # ----------------------------------------------------------------------------
-SHARD_DIR = os.path.join(args.data_root, "edu_fineweb10B")
+FINEWEB_DIR = args.fineweb_dir or os.path.join(args.data_root, "edu_fineweb10B")
 
 
 def load_tokens(filename):
@@ -376,17 +437,15 @@ def load_tokens(filename):
     return torch.tensor(npt, dtype=torch.long)
 
 
-class DataLoaderLite:
-    def __init__(self, B, T, process_rank, num_processes, split, data_root=SHARD_DIR):
+class _ShardStream:
+    """Sequential reader over the shards of one dir/split (the original loader)."""
+    def __init__(self, B, T, process_rank, num_processes, split, data_root):
         self.B, self.T = B, T
         self.process_rank = process_rank
         self.num_processes = num_processes
-        assert split in {"train", "val"}
         shards = sorted(s for s in os.listdir(data_root) if split in s)
         self.shards = [os.path.join(data_root, s) for s in shards]
         assert len(self.shards) > 0, f"no shards for split {split} in {data_root}"
-        if master_process:
-            log(f"found {len(self.shards)} shards for split {split}", console=True)
         self.reset()
 
     def reset(self):
@@ -406,22 +465,81 @@ class DataLoaderLite:
             self.current_position = B * T * self.process_rank
         return x, y
 
+    def state(self):
+        return {"shard": self.current_shard, "pos": self.current_position}
+
+    def load(self, st):
+        self.current_shard = st["shard"]
+        self.tokens = load_tokens(self.shards[self.current_shard])
+        self.current_position = st["pos"]
+
+
+class DataLoaderLite:
+    """Multi-source loader. `sources` is a list of (dir, weight); batches are
+    drawn from the sources by a deterministic weighted round-robin (largest-
+    remainder), so a source with weight 0.18 supplies ~18% of batches. A single
+    source (weight 1.0) reproduces the original behavior exactly."""
+    def __init__(self, B, T, process_rank, num_processes, split, sources):
+        self.streams, self.weights, self.names = [], [], []
+        for root, w in sources:
+            try:
+                self.streams.append(_ShardStream(B, T, process_rank, num_processes, split, root))
+                self.weights.append(w)
+                self.names.append(os.path.basename(root.rstrip("/")))
+            except AssertionError:
+                if master_process:
+                    log(f"  (no {split} shards in {root}, skipping)", console=True)
+        assert self.streams, f"no sources with {split} shards"
+        tot = sum(self.weights)
+        self.weights = [w / tot for w in self.weights]
+        if master_process:
+            mix = ", ".join(f"{n}={w:.2f}" for n, w in zip(self.names, self.weights))
+            log(f"{split} sources: {mix}", console=True)
+        self.reset()
+
+    def reset(self):
+        for s in self.streams:
+            s.reset()
+        self._acc = [0.0] * len(self.streams)
+
+    def next_batch(self):
+        self._acc = [a + w for a, w in zip(self._acc, self.weights)]
+        j = max(range(len(self._acc)), key=self._acc.__getitem__)
+        self._acc[j] -= 1.0
+        return self.streams[j].next_batch()
+
+    def state(self):
+        return {"streams": [s.state() for s in self.streams], "acc": list(self._acc)}
+
+    def load(self, st):
+        for s, ss in zip(self.streams, st["streams"]):
+            s.load(ss)
+        self._acc = list(st["acc"])
+
+
+# train mixes FineWeb + optional code; val is FineWeb only (comparable across runs)
+_train_sources = [(FINEWEB_DIR, 1.0)]
+if args.code_dir and args.code_frac > 0:
+    _train_sources = [(FINEWEB_DIR, 1.0 - args.code_frac), (args.code_dir, args.code_frac)]
 
 train_loader = DataLoaderLite(B=B, T=T, process_rank=ddp_rank,
-                              num_processes=ddp_world_size, split="train")
+                              num_processes=ddp_world_size, split="train", sources=_train_sources)
 val_loader = DataLoaderLite(B=B, T=T, process_rank=ddp_rank,
-                            num_processes=ddp_world_size, split="val")
+                            num_processes=ddp_world_size, split="val", sources=[(FINEWEB_DIR, 1.0)])
 
 
 # ----------------------------------------------------------------------------
 # build model, optimizers, schedulers
 # ----------------------------------------------------------------------------
-model = GPT(GPT2Config(vocab_size=args.vocab_size))
+model = GPT(GPT2Config(vocab_size=args.vocab_size, block_size=args.seq_len,
+                       n_layer=args.n_layer, n_embd=args.n_embd,
+                       n_head=args.n_head, kv_group=args.kv_group))
+model.doc_mask = args.doc_mask   # intra-document attention masking (off unless --doc-mask)
 model.to(device)
 
 max_steps = args.max_steps
-stable_start = int(args.warmup_frac * max_steps)
-decay_steps = int(args.decay_frac * max_steps)
+stable_start = max(1, int(args.warmup_frac * max_steps))   # clamp >=1 so tiny test runs don't divide by zero
+decay_steps = max(1, int(args.decay_frac * max_steps))
 decay_start = max_steps - decay_steps
 
 
@@ -439,7 +557,8 @@ muon, adamw = configure_optimizers(model, muon_lr=args.muon_lr, adam_lr=args.ada
 optimizers = [muon, adamw]
 schedulers = [torch.optim.lr_scheduler.LambdaLR(o, wsd) for o in optimizers]
 
-model = torch.compile(model)
+if not args.no_compile:
+    model = torch.compile(model)
 if ddp:
     model = DDP(model, device_ids=[ddp_local_rank])
 raw_model = model.module if ddp else model
@@ -464,10 +583,8 @@ if _ckpts:
         s.load_state_dict(sd)
     start_step = _ckpt["step"] + 1
     tr_loss = _ckpt.get("tr_loss", [])
-    if "current_shard" in _ckpt:
-        train_loader.current_shard = _ckpt["current_shard"]
-        train_loader.current_position = _ckpt["current_position"]
-        train_loader.tokens = load_tokens(train_loader.shards[train_loader.current_shard])
+    if "loader" in _ckpt:
+        train_loader.load(_ckpt["loader"])
     log(f"resumed from {_ckpts[-1]} at step {start_step}", console=True)
 
 
@@ -577,8 +694,7 @@ for step in range(start_step, max_steps):
             "scheduler": [s.state_dict() for s in schedulers],
             "step": step,
             "tr_loss": tr_loss,
-            "current_shard": train_loader.current_shard,
-            "current_position": train_loader.current_position,
+            "loader": train_loader.state(),
             "config": asdict(save_model.config),
             "run_name": args.run_name,
         }, path)
