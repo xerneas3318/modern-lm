@@ -14,11 +14,18 @@ FineWeb-Edu 10B is already prepared at /mnt/datasets/edu_fineweb10B, so the main
 use here is a CODE dataset (for the "write Python" goal). Run it into its own dir,
 then the multi-source loader mixes edu_fineweb10B + code by ratio at train time.
 
-Examples:
-  # Python code (adjust dataset/config/text-col to one you have access to):
-  python prepare_data.py --dataset codeparrot/github-code-clean --name Python-all \\
-      --text-col code --out-dir /mnt/datasets/code_python --prefix code \\
-      --total-tokens 2_000_000_000
+Build the FULL training data (both commands, on the pod set HF_HOME=/workspace/hf_cache):
+
+  # 1) FineWeb-Edu, 10B tokens  (the general-language corpus)
+  python prepare_data.py --dataset HuggingFaceFW/fineweb-edu --name sample-10BT \\
+      --text-col text --out-dir /workspace/data/edu_fineweb10B --prefix edufineweb \\
+      --total-tokens 10_000_000_000
+
+  # 2) Python code, 2B tokens  (for the "write Python" goal) -- VERIFIED WORKING dataset.
+  #    NOTE: codeparrot/github-code-clean is script-based and FAILS on datasets>=3
+  #    ("Dataset scripts are no longer supported"); use codeparrot-clean (inline `content`).
+  python prepare_data.py --dataset codeparrot/codeparrot-clean --text-col content \\
+      --out-dir /workspace/data/code_python --prefix code --total-tokens 2_000_000_000
 
   # tiny smoke test (writes one small shard and stops):
   python prepare_data.py --dataset HuggingFaceFW/fineweb-edu --name sample-10BT \\
