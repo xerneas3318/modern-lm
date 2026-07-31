@@ -463,3 +463,60 @@ bash /workspace/healthcheck.sh 0            # instant status report
 Everything above lives on `/workspace` and survives a pod stop/start. `/root` does not —
 after a restart the shell environment, `gh` auth and Claude config are gone, though the
 repo, venv, data, checkpoints and secrets are intact.
+
+---
+
+## 14. Final state and the /root migration
+
+Only `/workspace` survives a pod stop on RunPod. `/root`, `/usr`, `/opt` and `/etc` are on
+the container overlay and are wiped. Before shutdown the whole shell environment was moved
+onto the volume and symlinked back, so a restarted pod can be restored in one command.
+
+**Method — two classes of state, handled differently on purpose:**
+
+- *Inert* (dotfiles, plugins, toolchains): **moved** to `/workspace/env/home/` and
+  symlinked back. Zero drift afterwards — editing `~/.zshrc` edits the volume copy.
+- *Live* (the Claude install and its state dir): **copied**, never moved. A running
+  process was executing out of them; `bootstrap.sh` converts them to symlinks at next
+  boot when nothing holds them open.
+
+Verified after migration: all 13 symlinks resolve, and the tools still run *through* them
+— `nvim 0.12.4`, `cargo 1.97.1`, `node v24.18.1`, and `gh auth status` still reports
+logged in via the symlinked `~/.config/gh/hosts.yml`.
+
+The restore path was **dry-run tested** into a throwaway `$HOME` before shutdown
+(`ENV_HOME=/tmp/fakehome BOOTSTRAP_TEST=1 bash bootstrap.sh`), which linked every payload
+item correctly. A migration you cannot restore is worthless, so this was tested rather
+than assumed.
+
+**To restore after starting the pod again:**
+
+```bash
+bash /workspace/env/bootstrap.sh
+```
+
+It is idempotent: reinstalls only the apt delta (from 36 MB of cached .debs, so it works
+offline), relinks the payload, restores `/opt/nvim`, regenerates the locale, and sets zsh
+as the login shell — in that order, because pointing root at zsh *before* zsh exists would
+leave a container with no working login shell.
+
+**Credentials note.** `~/.config/gh` (GitHub OAuth) and `~/.claude/.credentials.json` were
+deliberately included so a restarted pod does not need re-authentication. Both now live on
+the network volume, which outlives the pod and can be mounted by other pods — and `chmod`
+does not stick on this MooseFS mount, so the files stay `rw-rw-rw-`. Rotate the tokens if
+that volume is ever shared.
+
+### Final artifact inventory (`/workspace`, 61 GB)
+
+| what | size |
+| --- | --- |
+| `modern-lm/` repo + `.venv` | 7.2G |
+| `data/` — 120 tokenized shards (10B + 2B tokens) | 23G |
+| `keep/` — end-of-stable + end-of-decay checkpoints | 8.1G |
+| `runs/` — every run's logs and final checkpoints | 19G |
+| `env/` — the migrated `/root` environment | 4.9G |
+| `sft_data/` — QA + RAG JSONL | 52M |
+| `.secrets/train-env.sh` | — |
+
+Nothing is single-homed on this pod: all six models are on HuggingFace and all code, logs
+and this report are on GitHub.
