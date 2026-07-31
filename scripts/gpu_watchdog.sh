@@ -49,8 +49,13 @@ while true; do
     fi
   else
     stall=0
-    if pipeline_done; then
-      say "pipeline COMPLETE and no trainer running — nothing left to watch, exiting cleanly"
+    # NOTE: this used to exit as soon as pipeline.sh logged COMPLETE. That was wrong.
+    # Manual runs launched outside the pipeline (e.g. the RAG retrains) still need
+    # watching, and the watchdog self-terminated in the gap between two of them — so
+    # it was NOT running when one died mid-checkpoint on a quota error. Only stop
+    # when explicitly told to.
+    if [ -f /workspace/watchdog.stop ]; then
+      say "watchdog.stop present — exiting cleanly"
       exit 0
     fi
     orphan=$((orphan+1))

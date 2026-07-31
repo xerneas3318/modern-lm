@@ -23,6 +23,10 @@ happened, and how it was fixed. Written so the next run does not repeat any of i
 | 8 | Bare dataset names rejected | `HfUriError` | `datasets 5.x` requires `namespace/name` | `rajpurkar/squad_v2` etc. |
 | 9 | Local JSONL unusable for SFT | — | `sft.py` only accepted HF repo ids | added local-file support + epoch restart (PEP 479) |
 | 10 | My own shell killed twice | exit 144 | `pkill -f "[p]attern"` also matched the *same* command line | kill by PID |
+| 11 | A training run died silently mid-write | GPU idle, no traceback, checkpoint truncated at exactly 512 MiB | **volume quota exhausted** — and `df` reports MooseFS *cluster* free space (305T), not the provisioned quota | freed 37 GB; added `quota_watch.sh` that probes a 600 MB write every 2 min |
+| 12 | Watchdog missed #11 entirely | no alert while the GPU sat idle | it exited on "pipeline COMPLETE and no trainer running" — true during the gap between two manual runs | only stop on an explicit `watchdog.stop` file |
+| 13 | Both RAG evals crashed | `IsADirectoryError` | my eval script only expanded a run dir into a checkpoint if the path ended in `/` or had a `*` | use `os.path.isdir()` |
+| 14 | Flagship model published private | — (caught on verification) | `create_repo(..., exist_ok=True)` does **not** change visibility of an existing repo | explicit `update_repo_settings(private=False)` |
 
 ---
 
@@ -329,6 +333,34 @@ tokens.
 frequent target can hijack a token-level objective. The only thing that caught this was
 querying the model with a case whose correct answer was known.
 
+### 9b. Then tuning it properly — three variants on one fixed suite
+
+All scored greedily on the *same* 10 cases (7 answerable, 3 unanswerable), reporting the
+two halves separately because "always abstain" and "never abstain" are opposite failure
+modes that a single aggregate hides:
+
+| variant | config | answerable | abstain | total |
+| --- | --- | --- | --- | --- |
+| v0 | 4k, lr 5e-5, 33.6% unans, long refusal | — | — | **collapsed** (loss 0.459, useless) |
+| v1 | 4k, lr 5e-5, 20% unans, short refusal | 4/7 | 2/3 | 6/10 |
+| v2 | **12k, lr 1e-4** | — | — | worse, degenerate (`"ChI don't know."`) |
+| **v3 (published)** | **12k, lr 5e-5** | **6/7** | 2/3 | **8/10** |
+
+v2 is a clean negative result: at lr 1e-4 the *training* loss was also higher (1.657 vs
+1.431), so the LR was the problem, not the step count. Holding lr at 5e-5 and tripling
+steps to 2.4 epochs gave the win. Remaining failures are honest limits — a wrong span for
+"How tall…" and answering "Peru" for a question the context does not cover.
+
+### 9c. The run that died mid-tuning
+
+v3's first attempt died at step 6000 with no traceback and a checkpoint truncated at
+exactly 536,870,912 bytes (512 MiB). Not an OOM (1.9 TB RAM free) and not a Python error.
+The cause was the **volume quota** (§0 #11): `torch.save` ran out of quota mid-write and
+the process was killed. `df` said 305T free the entire time.
+
+Three defences failed simultaneously: the quota was invisible, the write failed silently,
+and the GPU watchdog had self-terminated minutes earlier. All three are now fixed.
+
 ---
 
 ## 10. Process mistakes (mine) worth not repeating
@@ -354,6 +386,23 @@ querying the model with a case whose correct answer was known.
 ---
 
 ## 11. Publishing
+
+Six models, all public:
+
+| repo | from | notes |
+| --- | --- | --- |
+| `modern-1024x24-base-stable` | step 15000 | end of WSD stable, LR still at max |
+| `modern-1024x24-base` | step 19072 | end of decay, val **2.7618** |
+| `modern-1024x24-sft` | sft1 | chat + 15% tool-call |
+| `modern-1024x24-sft-toolcall` | sft1 → 50% tool-call | tool loop verified end-to-end |
+| `modern-1024x24-sft-qa` | sft1 | format reliable, facts are not |
+| `modern-1024x24-sft-rag` | sft1, 12k @ 5e-5 | **8/10** grounded QA |
+
+**GitHub push gotcha.** The first push was rejected with
+`push declined due to email privacy restrictions` — the account has "Block command line
+pushes that expose my email" enabled, so commits authored from the real address are
+refused. Fixed by authoring as `<id>+<login>@users.noreply.github.com`. Local
+`git config user.email` was left as the user set it.
 
 Uploads ship **extracted** weights, not raw checkpoints. A raw `ckpt_*.pt` is 4.31 GB
 because it carries Muon momentum buffers, AdamW moments, scheduler and dataloader state.
