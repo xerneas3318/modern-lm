@@ -60,6 +60,10 @@ def get_args():
     p.add_argument("--warmup-frac", type=float, default=0.03)
     p.add_argument("--decay-frac", type=float, default=0.20)
     # cadence
+    p.add_argument("--log-every", type=int, default=100,
+                   help="how often (in steps) to write the progress+ETA line to train.log/console. "
+                        "Cheap: one line costs ~2.2ms on the network volume, so even 10 is ~4s "
+                        "over the whole run.")
     p.add_argument("--val-every", type=int, default=250)
     p.add_argument("--ckpt-every", type=int, default=1000)
     p.add_argument("--gen-every", type=int, default=4000)
@@ -326,6 +330,11 @@ def generate(prompt="Shakespeare:", n_new=60, k_samples=2):
 model.train()
 last_val_loss = float("nan")
 t0 = time.time()
+# smoothed per-step time, used for the ETA. Deliberately NOT a simple
+# elapsed/steps average: the first step carries the torch.compile cost (~3 min),
+# which would otherwise be amortised into every remaining step and inflate the
+# ETA by an order of magnitude early in the run.
+ema_dt = None
 
 pbar = tqdm(range(start_step, max_steps), initial=start_step, total=max_steps,
             disable=not master_process, dynamic_ncols=True, desc="train")
@@ -380,18 +389,34 @@ for step in pbar:
         torch.cuda.synchronize()
     dt = time.time() - tstep
     toks_per_sec = total_batch_size / dt if dt > 0 else 0.0
+    if step > start_step:   # skip the compile-laden first step
+        ema_dt = dt if ema_dt is None else 0.9 * ema_dt + 0.1 * dt
 
     if master_process:
+        # kept every step: in-memory only (no I/O), and it is what gives loss.png its
+        # full-resolution curve — it rides along in the checkpoint as "tr_loss".
         tr_loss.append(loss_accum.item())
-        log(f"{step} train {loss_accum.item():.6f} norm {norm:.4f}")
         lr_m = schedulers[0].get_last_lr()[0]
         lr_a = schedulers[1].get_last_lr()[0]
         # live per-step view on the progress bar
         pbar.set_postfix(loss=f"{loss_accum.item():.3f}", lr_m=f"{lr_m:.1e}",
                          lr_a=f"{lr_a:.1e}", norm=f"{norm:.2f}", tok_s=f"{toks_per_sec:,.0f}")
-        if step % 100 == 0 or last_step:
-            log(f"step {step:5d} | loss {loss_accum.item():.4f} | lr_muon {lr_m:.2e} "
-                f"lr_adam {lr_a:.2e} | norm {norm:.2f} | {toks_per_sec:,.0f} tok/s", console=True)
+        # log every --log-every steps (default 100). One combined line, still parseable
+        # as "<step> train <loss> norm <norm> ..." so existing tooling keeps working.
+        if step % args.log_every == 0 or last_step:
+            el = time.time() - t0
+            # no honest rate yet on the very first step (it carries the compile), so
+            # say so rather than printing a garbage number
+            if ema_dt:
+                rem = (max_steps - 1 - step) * ema_dt
+                eta = f"{int(rem // 3600)}h{int(rem % 3600 // 60):02d}m"
+            else:
+                eta = "(compiling)"
+            wall = f"{int(el // 3600)}h{int(el % 3600 // 60):02d}m"
+            log(f"{step} train {loss_accum.item():.6f} norm {norm:.4f} "
+                f"lr_muon {lr_m:.2e} lr_adam {lr_a:.2e} tok_s {toks_per_sec:.0f} "
+                f"| {step + 1}/{max_steps} ({(step + 1) / max_steps * 100:.1f}%) "
+                f"| elapsed {wall} | eta {eta}", console=True)
 
     # periodic generation sample
     if (step % args.gen_every == 0 and step > 0) or last_step:
