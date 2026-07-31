@@ -108,17 +108,32 @@ def synth_toolcall_example():
                                    f"{a}{sym}{b}", f"The answer is {ans}.", system=SYS)
 
 
+def _mk_iter():
+    """Fresh iterator over --data. Accepts a HF repo id OR a local .jsonl/.json file
+    of {"messages": [...]} rows (used for the QA and RAG sets)."""
+    from datasets import load_dataset
+    if args.data.endswith((".jsonl", ".json")):
+        return iter(load_dataset("json", data_files=args.data, split="train", streaming=True))
+    return iter(load_dataset(args.data, split="train", streaming=True))
+
+
 def chat_stream():
     """Yield (ids, mask) examples: mostly dataset chat, some synthetic tool-call."""
     ds_iter = None
     if args.toolcall_frac < 1.0:
-        from datasets import load_dataset
-        ds_iter = iter(load_dataset(args.data, split="train", streaming=True))
+        ds_iter = _mk_iter()
     while True:
         if ds_iter is None or random.random() < args.toolcall_frac:
             yield synth_toolcall_example()
         else:
-            row = next(ds_iter)
+            try:
+                row = next(ds_iter)
+            except StopIteration:
+                # a local file is finite: start another epoch. Letting StopIteration
+                # escape a generator raises RuntimeError under PEP 479, which would
+                # kill the run at the end of epoch 1 instead of looping.
+                ds_iter = _mk_iter()
+                row = next(ds_iter)
             msgs = row[args.messages_col]
             ids, mask = format_chat(enc, msgs)
             if sum(mask) > 0:                      # skip if nothing to learn

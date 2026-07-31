@@ -5,6 +5,8 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
+    "datasets>=5.0.1",
+    "huggingface-hub>=1.25.1",
     "mplt>=2.1.0",
     "tiktoken>=0.13.0",
     "torch>=2.13.0",
