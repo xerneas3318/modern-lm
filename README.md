@@ -86,9 +86,15 @@ The padded vocab reserves special tokens for post-training that never appear dur
 - **Result:** validation loss from 11.03 at init down to **2.7618**.
 
 <div align="center">
-  <img src="loss.png" width="760" alt="Training loss curve over 19,073 steps">
+  <img src="images/training-loss.png" width="760" alt="Training loss curve over 19,073 steps">
   <br>
   <em>Training loss across the full run. Note how the final decay phase (right) delivers the largest drop.</em>
+</div>
+
+<div align="center">
+  <img src="images/training-log.png" width="820" alt="Live training log and GPU monitor on the H100">
+  <br>
+  <em>The run in progress: train loss, learning rates, and ~131k tokens/sec, with the H100 pinned at 99 to 100 percent.</em>
 </div>
 
 ## The models
@@ -184,6 +190,19 @@ For the recipe I leaned on [nanochat](https://github.com/karpathy/nanochat) and 
 ## Try it
 
 A Streamlit playground (`app.py`) wraps all five models behind a sidebar: chat, calculator, closed-book QA, RAG with your own uploaded context, and raw base completion.
+
+<div align="center">
+<table>
+<tr>
+<td><img src="images/demo-calculator.png" width="410" alt="Calculator tool-calling tab"></td>
+<td><img src="images/demo-qa.png" width="410" alt="Closed-book QA tab"></td>
+</tr>
+<tr>
+<td align="center"><em>Calculator: the model writes a tool call, a calculator runs it, the result is fed back</em></td>
+<td align="center"><em>Closed-book QA</em></td>
+</tr>
+</table>
+</div>
 
 ```bash
 uv sync
