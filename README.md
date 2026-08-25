@@ -24,6 +24,7 @@
 - [Post-training](#post-training)
 - [Try it](#try-it)
 - [What I learned](#what-i-learned)
+- [How this was built](#how-this-was-built)
 - [Resources](#resources)
 - [Acknowledgments](#acknowledgments)
 - [License](#license)
@@ -228,6 +229,12 @@ enc = build_enc()
 - Most of a base model's usefulness is unlocked in post-training, but post-training cannot add knowledge the base does not have. At 481M / 10B tokens the format is reliable and the facts are not.
 - A low loss is not proof a model works. The RAG model once reached the lowest loss of any stage by learning to always say "I don't know," which is exactly why I test with questions whose answers I know.
 - Implementing each idea by hand instead of importing it, then diffing against a reference, taught me far more than reading the papers would have.
+
+## How this was built
+
+The majority of the logic here is mine. My workflow was to implement each model and logic change by hand, from scratch, in `gpt.ipynb`, working out the architecture myself, and then convert that notebook into the headless `train.py` training script with AI assistance. The tool-calling loop (`toolcall.py`) and the data-formatting and SFT scripts were also written with AI help.
+
+So the architecture choices, the from-scratch implementations in the notebook, and the decisions about what to try are mine. The AI mostly turned my notebook code into runnable scripts and handled the surrounding plumbing.
 
 ## Resources
 
