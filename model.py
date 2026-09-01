@@ -1,4 +1,5 @@
 """
+Claude generated trainscript from my hand written code in gpt.ipynb.
 model.py -- shared model / optimizer / tokenizer definitions for modern-lm.
 
 Imported by train.py (pretraining), sft.py (SFT + tool-call training), and
