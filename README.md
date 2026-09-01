@@ -39,7 +39,7 @@ I wanted to go further. I read through a stack of papers, tech reports, and spee
 
 None of the ideas are mine. The work was reading each one, implementing it without copying a reference, checking that it actually helped, and getting all of them to cooperate in one clean codebase (`model.py`), then training the whole thing end to end.
 
-It is a small model. The format and behavior are real; the world knowledge is limited. That tradeoff is the point of building it yourself.
+It is a small model. The format and behavior are real; the world knowledge is limited. (The gpt.ipynb was written by hand, but then i got claude to help with trainscript conversions and runtime ops)
 
 ## What went into it
 
