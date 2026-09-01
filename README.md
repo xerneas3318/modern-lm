@@ -35,7 +35,7 @@
 
 This project picks up where my earlier repo, **[zero-to-gpt2](https://github.com/xerneas3318/zero-to-gpt2)**, left off. That one was my run through Karpathy's *Neural Networks: Zero to Hero*, rebuilding GPT-2 by hand to understand every line. It ends with a working but 2019-era model.
 
-I wanted to go further. I read through a stack of papers, tech reports, and speedrun writeups on what separates a modern model from GPT-2, picked the parts that looked most promising, implemented each one from scratch, and cobbled them together into a single ~481M model. Then I trained it on 10B tokens and post-trained the base into an assistant.
+I wanted to go further. I read through a several papers, blogposts, and github repos (all credited below) that implemented relatively small llm's and looked for their major architectural differences from GPT-2, picked the parts that looked most promising, implemented each one from scratch, and cobbled them together into a single ~481M model. Then I trained it on 10B tokens and post-trained the base into an assistant.
 
 None of the ideas are mine. The work was reading each one, implementing it without copying a reference, checking that it actually helped, and getting all of them to cooperate in one clean codebase (`model.py`), then training the whole thing end to end.
 
@@ -174,7 +174,7 @@ Q: When was it completed?             A: 1889
 Q: What is the population of Brazil?   (not in context)   A: I don't know.
 ```
 
-The abstention is the interesting part: trained on a mix that includes unanswerable questions, the RAG model learns to say "I don't know" rather than hallucinate when the answer is not in the context.
+The model was trained on a mix that includes unanswerable questions, the RAG model learns to say "I don't know" rather than hallucinate when the answer is not in the context.
 
 ## Post-training
 
@@ -190,7 +190,7 @@ For the recipe I leaned on [nanochat](https://github.com/karpathy/nanochat) and 
 
 ## Try it
 
-A Streamlit playground (`app.py`) wraps all five models behind a sidebar: chat, calculator, closed-book QA, RAG with your own uploaded context, and raw base completion.
+A Streamlit playground (`app.py`) provides a localhosted ui to interact with the model.
 
 <div align="center">
 <table>
@@ -222,13 +222,6 @@ model.load_state_dict(ckpt["model"])
 model.eval()
 enc = build_enc()
 ```
-
-## What I learned
-
-- Most of these ideas are small, independent wins that compound. Muon and the WSD decay phase moved the loss the most.
-- Most of a base model's usefulness is unlocked in post-training, but post-training cannot add knowledge the base does not have. At 481M / 10B tokens the format is reliable and the facts are not.
-- A low loss is not proof a model works. The RAG model once reached the lowest loss of any stage by learning to always say "I don't know," which is exactly why I test with questions whose answers I know.
-- Implementing each idea by hand instead of importing it, then diffing against a reference, taught me far more than reading the papers would have.
 
 ## How this was built
 
