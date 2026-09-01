@@ -43,7 +43,7 @@ It is a small model. The format and behavior are real; the world knowledge is li
 
 ## What went into it
 
-These are the ideas I pulled in and stitched together, with the paper or writeup I worked from for each. All of them live in `model.py`.
+These are the ideas I pulled in and stitched together, with the paper or writeup I worked from for each. All of them are in `gpt.ipynb` or `model.py`.
 
 | Component | What it does | Source |
 |-----------|--------------|--------|
@@ -184,7 +184,7 @@ The base model is a next-token predictor, not an assistant. Turning it into one 
 - Synthetic arithmetic **tool-call** examples are mixed in, with the injected tool result masked out so the model learns to *write the call and use the result* rather than fabricate it.
 - The chat model was then branched into the tool-call, closed-book QA, and RAG specialists, each a short fine-tune on its own data.
 
-The tokenizer, calculator, and inference loop live in `toolcall.py`. The calculator is a strict arithmetic evaluator (it rejects names, calls, and imports), so it is a calculator, never code execution.
+The tokenizer, calculator, and inference loop are in `toolcall.py`. The calculator is a strict arithmetic evaluator (it rejects names, calls, and imports), so it is a calculator, never code execution.
 
 For the recipe I leaned on [nanochat](https://github.com/karpathy/nanochat) and [TRL](https://github.com/huggingface/trl). The obvious next steps I have not done yet are preference tuning with [DPO](https://arxiv.org/abs/2305.18290) and RL with verifiable rewards ([open-r1](https://github.com/huggingface/open-r1)).
 
